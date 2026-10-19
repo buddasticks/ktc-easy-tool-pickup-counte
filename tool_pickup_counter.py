@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Simple lifetime KTC-Easy toolchange/pickup counters using Moonraker's HTTP API.
+"""Lifetime KTC-Easy toolchange/pickup counters using Moonraker's HTTP API.
 
 No Klipper macros or third-party Python packages are required.
 """
 import argparse
 import json
 import logging
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -76,6 +78,9 @@ class Moonraker:
 class Counter:
     def __init__(self, api: Moonraker, dry_run: bool = False):
         self.api = api
+        # Saving is deliberately isolated from the fast polling loop. A macro can
+        # keep Klipper's G-code queue busy long enough for a normal HTTP timeout.
+        self.writer_api = Moonraker(api.base_url, timeout=30.0)
         self.dry_run = dry_run
         self.values = {name: 0 for name in COUNTER_NAMES}
         self.previous_status: Optional[str] = None
@@ -83,8 +88,9 @@ class Counter:
         self.start_tool = -1
         self.target_tool = -1
         self.last_signature = None
-        self.pending_saves = {}
-        self.last_save_retry = 0.0
+        self.pending_saves: Dict[str, int] = {}
+        self.pending_lock = threading.Lock()
+        self.save_wakeup = threading.Event()
 
     def load(self, status: Dict[str, Any]) -> None:
         saved = status.get("save_variables", {}).get("variables", {}) or {}
@@ -100,26 +106,69 @@ class Counter:
         if self.dry_run:
             LOG.info("DRY RUN: would SAVE_VARIABLE %s=%d", name, value)
             return
-        try:
-            self.api.save_variable(name, value)
-        except Exception as exc:
+        # Coalesce updates: only the newest value for a counter needs writing.
+        with self.pending_lock:
             self.pending_saves[name] = value
-            LOG.warning(
-                "SAVE_VARIABLE %s=%d failed; queued for retry: %s",
-                name, value, exc,
-            )
-        else:
-            self.pending_saves.pop(name, None)
+        self.save_wakeup.set()
 
-    def retry_pending_saves(self) -> None:
-        if not self.pending_saves:
-            return
-        now = time.monotonic()
-        if now - self.last_save_retry < 2.0:
-            return
-        self.last_save_retry = now
-        for name in list(self.pending_saves):
-            self.persist(name)
+    def save_worker(self) -> None:
+        """Persist queued values outside the monitor's polling loop."""
+        while True:
+            self.save_wakeup.wait(timeout=0.5)
+            self.save_wakeup.clear()
+
+            with self.pending_lock:
+                queued = list(self.pending_saves.items())
+            if not queued:
+                continue
+
+            try:
+                status = self.writer_api.query()
+                tc = status.get("toolchanger", {})
+                state = str(tc.get("status", "unknown")).lower()
+                # Do not add G-code to the queue while a toolchange macro is
+                # running. Retry after it reaches a stable state.
+                if state not in ("ready", "error"):
+                    continue
+            except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
+                LOG.warning("Cannot check toolchanger state before saving; queued values retained: %s", exc)
+                continue
+
+            for name, value in queued:
+                try:
+                    self.writer_api.save_variable(name, value)
+                    # SAVE_VARIABLE is asynchronous relative to the HTTP request;
+                    # read back the saved value before considering it complete.
+                    verify_status = self.writer_api.query()
+                    variables = verify_status.get("save_variables", {}).get("variables", {}) or {}
+                    try:
+                        saved_value = int(variables.get(name, -1))
+                    except (TypeError, ValueError):
+                        saved_value = -1
+
+                    if saved_value != value:
+                        LOG.warning(
+                            "SAVE_VARIABLE %s=%d not verified (read back %s); keeping queued for retry",
+                            name, value, saved_value,
+                        )
+                        continue
+
+                    with self.pending_lock:
+                        if self.pending_saves.get(name) == value:
+                            self.pending_saves.pop(name, None)
+                    LOG.info("SAVE VERIFIED %s=%d", name, value)
+                except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
+                    LOG.warning(
+                        "SAVE_VARIABLE %s=%d not verified; keeping queued for retry: %s",
+                        name, value, exc,
+                    )
+                except Exception:
+                    LOG.exception("Unexpected save-worker error for %s=%d; queued value retained", name, value)
+
+            with self.pending_lock:
+                if self.pending_saves:
+                    # Keep retrying, but never block the polling thread.
+                    self.save_wakeup.set()
 
     def increment(self, name: str, reason: str) -> None:
         self.values[name] += 1
@@ -217,20 +266,22 @@ def main() -> None:
             initial = api.query()
             counter.load(initial)
             break
-        except Exception as exc:
+        except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
             LOG.warning("Waiting for Moonraker: %s", exc)
             time.sleep(2)
+
+    if not args.dry_run:
+        threading.Thread(target=counter.save_worker, name="counter-save-worker", daemon=True).start()
 
     while True:
         try:
             status = api.query()
             counter.process(status)
-            counter.retry_pending_saves()
             time.sleep(args.poll)
         except KeyboardInterrupt:
             LOG.info("Stopped. %s", counter.summary())
             return
-        except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
+        except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
             LOG.warning("Moonraker query failed; retrying without inferring an outcome: %s", exc)
             counter.previous_status = None
             counter.active_attempt = False
