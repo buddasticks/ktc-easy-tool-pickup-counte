@@ -165,10 +165,9 @@ class Counter:
                 except Exception:
                     LOG.exception("Unexpected save-worker error for %s=%d; queued value retained", name, value)
 
-            with self.pending_lock:
-                if self.pending_saves:
-                    # Keep retrying, but never block the polling thread.
-                    self.save_wakeup.set()
+            # Any still-pending values are retried on the next 0.5-second
+            # worker wake-up. Do not set the event here: that would spin in a
+            # tight loop if Klipper is still busy or read-back is delayed.
 
     def increment(self, name: str, reason: str) -> None:
         self.values[name] += 1
