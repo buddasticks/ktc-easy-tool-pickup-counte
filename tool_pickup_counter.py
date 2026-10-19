@@ -48,17 +48,23 @@ class Moonraker:
         return result
 
     def query(self) -> Dict[str, Any]:
-        response = self.post(
-            "/printer/objects/query",
-            {"objects": {
-                "toolchanger": [
-                    "status", "tool_number", "detected_tool_number",
-                    "tool", "detected_tool", "has_detection"
-                ],
-                "save_variables": ["variables"],
-            }},
+        from urllib.parse import urlencode
+
+        objects = {
+            "toolchanger": "status,tool_number,detected_tool_number,tool,detected_tool,has_detection",
+            "save_variables": "variables",
+        }
+        url = f"{self.base_url}/printer/objects/query?{urlencode(objects)}"
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "application/json"},
+            method="GET",
         )
-        return response.get("result", {}).get("status", {})
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if "error" in result:
+            raise RuntimeError(result["error"].get("message", str(result["error"])))
+        return result.get("result", {}).get("status", {})
 
     def save_variable(self, name: str, value: int) -> None:
         self.post(
@@ -77,6 +83,8 @@ class Counter:
         self.start_tool = -1
         self.target_tool = -1
         self.last_signature = None
+        self.pending_saves = {}
+        self.last_save_retry = 0.0
 
     def load(self, status: Dict[str, Any]) -> None:
         saved = status.get("save_variables", {}).get("variables", {}) or {}
@@ -92,7 +100,26 @@ class Counter:
         if self.dry_run:
             LOG.info("DRY RUN: would SAVE_VARIABLE %s=%d", name, value)
             return
-        self.api.save_variable(name, value)
+        try:
+            self.api.save_variable(name, value)
+        except Exception as exc:
+            self.pending_saves[name] = value
+            LOG.warning(
+                "SAVE_VARIABLE %s=%d failed; queued for retry: %s",
+                name, value, exc,
+            )
+        else:
+            self.pending_saves.pop(name, None)
+
+    def retry_pending_saves(self) -> None:
+        if not self.pending_saves:
+            return
+        now = time.monotonic()
+        if now - self.last_save_retry < 2.0:
+            return
+        self.last_save_retry = now
+        for name in list(self.pending_saves):
+            self.persist(name)
 
     def increment(self, name: str, reason: str) -> None:
         self.values[name] += 1
@@ -157,14 +184,12 @@ class Counter:
             self.target_tool = -1
 
         elif self.active_attempt and state == "ready":
-            # Count success only for the attempt that was observed entering changing.
             success_tool = self.target_tool if self.target_tool in TOOLS else selected
             if success_tool in TOOLS and selected == success_tool and detected == success_tool:
                 self.increment(f"tool_t{success_tool}_pickups", "pickup verified")
                 self.active_attempt = False
                 self.target_tool = -1
             elif selected == detected and selected in TOOLS:
-                # A ready state without a matching target is not enough to infer a pickup.
                 LOG.info("Ready state observed, but no matching active pickup target; not counted")
                 self.active_attempt = False
                 self.target_tool = -1
@@ -200,14 +225,13 @@ def main() -> None:
         try:
             status = api.query()
             counter.process(status)
+            counter.retry_pending_saves()
             time.sleep(args.poll)
         except KeyboardInterrupt:
             LOG.info("Stopped. %s", counter.summary())
             return
         except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
             LOG.warning("Moonraker query failed; retrying without inferring an outcome: %s", exc)
-            # Reset baseline after an outage so a state change that happened while
-            # disconnected is not incorrectly interpreted as a new attempt/success.
             counter.previous_status = None
             counter.active_attempt = False
             counter.target_tool = -1
