@@ -1,0 +1,17 @@
+[Unit]
+Description=KTC-Easy Tool Pickup Counter
+After=moonraker.service
+Wants=moonraker.service
+
+[Service]
+Type=simple
+User=biqu
+WorkingDirectory=/home/biqu/tool_pickup_counter
+ExecStart=/usr/bin/python3 /home/biqu/tool_pickup_counter/tool_pickup_counter.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
