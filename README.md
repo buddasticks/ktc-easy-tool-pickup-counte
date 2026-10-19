@@ -7,7 +7,7 @@ Version 2.0 — standalone Moonraker monitor for the Sovol SV08 / KTC-Easy four-
 - Counts observed toolchange attempts, including failed attempts.
 - Counts verified successful pickups for T0–T3.
 - Counts only clearly identified per-tool pickup failures.
-- Persists totals through Klipper's `SAVE_VARIABLE` in the existing `variables.cfg`.
+- Persists totals through Klipper's `SAVE_VARIABLE` in the file configured by Klipper's `[save_variables]` section (for example, `saved_variables.cfg`).
 - Uses Python's standard library; no pip packages or Klipper macro edits required.
 
 ## Important architecture note
@@ -56,8 +56,8 @@ cd /home/biqu/tool_pickup_counter
 ./uninstall.sh
 ```
 
-This removes the service and its systemd link but preserves the runtime folder and saved counters. To delete the program files manually after uninstalling, run `rm -rf /home/biqu/tool_pickup_counter`. The saved counters are in Klipper's `variables.cfg` and are not removed by this package.
+This removes the service and its systemd link but preserves the runtime folder and saved counters. To delete the program files manually after uninstalling, run `rm -rf /home/biqu/tool_pickup_counter`. The saved counters are in the file configured by Klipper's `[save_variables]` section and are not removed by this package.
 
 ## Limitations
 
-The monitor polls Moonraker every 0.25 seconds. Brief transitions or events during a monitor outage may be missed. Ambiguous errors are not assigned to a specific tool rather than guessed. Verify counting on the live printer before treating the totals as authoritative.
+The monitor reads Klipper objects through Moonraker's GET `/printer/objects/query` endpoint and polls every 0.25 seconds. Brief transitions or events during a monitor outage may be missed. Failed `SAVE_VARIABLE` requests are queued and retried every two seconds while the monitor remains running; a power loss before a retry succeeds can still lose that pending update. Ambiguous errors are not assigned to a specific tool rather than guessed. Verify counting on the live printer before treating the totals as authoritative.
