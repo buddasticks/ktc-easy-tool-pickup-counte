@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 MOONRAKER = "http://127.0.0.1:7125"
 POLL_SECONDS = 0.25
 TOOLS = range(4)
-COUNTER_NAMES = ["total_toolchanges"] + [
+COUNTER_NAMES = ["total_toolchanges", "print_toolchanges"] + [
     name
     for tool in TOOLS
     for name in (f"tool_t{tool}_pickups", f"tool_t{tool}_failures")
@@ -55,6 +55,7 @@ class Moonraker:
         objects = {
             "toolchanger": "status,tool_number,detected_tool_number,tool,detected_tool,has_detection",
             "save_variables": "variables",
+            "print_stats": "state,filename",
         }
         url = f"{self.base_url}/printer/objects/query?{urlencode(objects)}"
         request = urllib.request.Request(
@@ -84,6 +85,7 @@ class Counter:
         self.dry_run = dry_run
         self.values = {name: 0 for name in COUNTER_NAMES}
         self.previous_status: Optional[str] = None
+        self.previous_print_state: Optional[str] = None
         self.active_attempt = False
         self.start_tool = -1
         self.target_tool = -1
@@ -175,7 +177,7 @@ class Counter:
         self.persist(name)
 
     def summary(self) -> str:
-        parts = [f"total={self.values['total_toolchanges']}"]
+        parts = [f"total={self.values['total_toolchanges']}", f"this_print={self.values['print_toolchanges']}"]
         for tool in TOOLS:
             parts.append(
                 f"T{tool}:ok={self.values[f'tool_t{tool}_pickups']}"
@@ -191,6 +193,15 @@ class Counter:
             return default
 
     def process(self, status: Dict[str, Any]) -> None:
+        # Reset current-print total on the transition into a new print.
+        print_stats = status.get("print_stats", {})
+        print_state = str(print_stats.get("state", "standby")).lower()
+        if print_state == "printing" and self.previous_print_state != "printing":
+            self.values["print_toolchanges"] = 0
+            LOG.info("New print detected; print_toolchanges reset to 0")
+            self.persist("print_toolchanges")
+        self.previous_print_state = print_state
+
         tc = status.get("toolchanger")
         if not isinstance(tc, dict):
             return
@@ -209,6 +220,7 @@ class Counter:
             self.start_tool = selected
             self.target_tool = -1
             self.increment("total_toolchanges", "toolchange attempt started")
+            self.increment("print_toolchanges", "toolchange attempt during current print")
             LOG.info("Toolchange started (current T%d, awaiting target)", self.start_tool)
 
         if self.active_attempt and state == "changing":
@@ -283,6 +295,7 @@ def main() -> None:
         except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
             LOG.warning("Moonraker query failed; retrying without inferring an outcome: %s", exc)
             counter.previous_status = None
+            counter.previous_print_state = None
             counter.active_attempt = False
             counter.target_tool = -1
             time.sleep(2)
