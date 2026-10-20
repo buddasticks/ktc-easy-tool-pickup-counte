@@ -14,7 +14,7 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 MOONRAKER = "http://127.0.0.1:7125"
-POLL_SECONDS = 0.25
+POLL_SECONDS = 0.5
 TOOLS = range(4)
 COUNTER_NAMES = ["total_toolchanges", "print_toolchanges"] + [
     name
@@ -196,7 +196,11 @@ class Counter:
         # Reset current-print total on the transition into a new print.
         print_stats = status.get("print_stats", {})
         print_state = str(print_stats.get("state", "standby")).lower()
-        if print_state == "printing" and self.previous_print_state != "printing":
+        if (
+            print_state == "printing"
+            and self.previous_print_state is not None
+            and self.previous_print_state != "printing"
+        ):
             self.values["print_toolchanges"] = 0
             LOG.info("New print detected; print_toolchanges reset to 0")
             self.persist("print_toolchanges")
@@ -262,7 +266,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="log counter changes without writing SAVE_VARIABLE")
     parser.add_argument("--url", default=MOONRAKER, help=f"Moonraker base URL (default: {MOONRAKER})")
-    parser.add_argument("--poll", type=float, default=POLL_SECONDS, help="poll interval in seconds (default: 0.25)")
+    parser.add_argument("--poll", type=float, default=POLL_SECONDS, help="poll interval in seconds (default: 0.5)")
     args = parser.parse_args()
     if args.poll < 0.1:
         parser.error("--poll must be at least 0.1 seconds")
@@ -295,7 +299,6 @@ def main() -> None:
         except (urllib.error.URLError, socket.timeout, TimeoutError, RuntimeError, ValueError, KeyError) as exc:
             LOG.warning("Moonraker query failed; retrying without inferring an outcome: %s", exc)
             counter.previous_status = None
-            counter.previous_print_state = None
             counter.active_attempt = False
             counter.target_tool = -1
             time.sleep(2)
