@@ -5,9 +5,10 @@ Version 2.0 — standalone Moonraker monitor for the Sovol SV08 / KTC-Easy four-
 ## What it does
 
 - Counts observed toolchange attempts, including failed attempts.
+- Tracks one `print_toolchanges` total for the current/most recent print; it resets when the next print enters `printing` and counts every observed toolchange attempt (successful or failed).
 - Counts verified successful pickups for T0–T3.
 - Counts only clearly identified per-tool pickup failures.
-- Persists totals through Klipper's `SAVE_VARIABLE` in the file configured by Klipper's `[save_variables]` section (for example, `saved_variables.cfg`).
+- Persists lifetime totals and the current/most-recent print total through Klipper's `SAVE_VARIABLE` in the file configured by Klipper's `[save_variables]` section (for example, `saved_variables.cfg`).
 - Uses Python's standard library; no pip packages or Klipper macro edits required.
 
 ## Important architecture note
